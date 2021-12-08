@@ -19,6 +19,7 @@ import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction)
 
+
 width :: Int
 width = 9
 
@@ -28,7 +29,9 @@ height = 9
 main :: Effect Unit
 main = runReactor reactor { title: "Bomberman", width, height }
 
-data Tile = Wall | Box | Empty
+type Bomb = Int
+
+data Tile = Wall | Box | Bomb | Empty
 
 derive instance tileEq :: Eq Tile
 
@@ -38,7 +41,7 @@ isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
 
 isCorner :: Coordinates -> Boolean
-isCorner { x, y } = (x == 1 || x == width - 1) && (y == 1 || y == height - 1)
+isCorner { x, y } = (x == 1 || x == width - 2) && (y == 1 || y == height - 2)
 
 -- giveNumber :: Int
 -- giveNumber = do 
@@ -68,14 +71,18 @@ draw { player, board } = do
   drawTile Empty = Just Color.green50
   drawTile Box = Just Color.blue300
   drawTile Wall = Just Color.gray500
+  drawTile Bomb = Just Color.red500
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
+  {player, board} <- getW
+  let newBoard = updateGrid player board
   case event of
     KeyPress { key: "ArrowLeft" } -> movePlayer { x: -1, y: 0 }
     KeyPress { key: "ArrowRight" } -> movePlayer { x: 1, y: 0 }
     KeyPress { key: "ArrowDown" } -> movePlayer { x: 0, y: 1 }
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
+    KeyPress { key: " " } -> updateW_ {board: newBoard}
 
     _ -> executeDefaultBehavior
 
@@ -87,3 +94,10 @@ movePlayer { x: xd, y: yd } = do
     updateW_ { player: newPlayerPosition }
   where
   isEmpty position board = Grid.index board position == Just Empty
+
+updateGrid :: Coordinates -> Grid Tile -> Grid Tile
+updateGrid cords board = do
+  let newBoard = (Grid.updateAt cords Bomb board)
+  case newBoard of 
+    Nothing -> board
+    Just x -> x
