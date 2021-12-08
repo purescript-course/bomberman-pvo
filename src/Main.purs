@@ -46,7 +46,7 @@ isCorner { x, y } = (x == 1 || x == width - 2) && (y == 1 || y == height - 2)
 -- giveNumber :: Int
 -- giveNumber = do 
 --   x <- liftEffect (randomInt 1 3)
---   x
+---   x
 
 isBox :: Coordinates -> Boolean
 isBox { x, y } = 
