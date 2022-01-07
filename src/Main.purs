@@ -1,24 +1,42 @@
-module Main where
+module Main
+  ( Bomb
+  , Tile(..)
+  , World
+  , coolerFlipIt
+  , draw
+  , flipIt
+  , flipIts
+  , handleEvent
+  , height
+  , initial
+  , isBox
+  , isCorner
+  , isWall
+  , main
+  , movePlayer
+  , reactor
+  , updateGrid
+  , width
+  )
+  where
 
+import Data.List
 import Prelude
 
-import Data.Grid (Grid, Coordinates)
+import Data.Array as Array
+import Data.Grid (Coordinates, Grid(..), construct)
 import Data.Grid as Grid
 import Data.Int (even)
+import Data.List as List
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
-import Effect.Class (liftEffect)
-import Effect.Class (liftEffect)
-import Effect.Console (log)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
-import Math ((%))
 import Reactor (Reactor, dimensions, executeDefaultBehavior, getW, runReactor, updateW_)
 import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction)
-
 
 width :: Int
 width = 9
@@ -27,7 +45,9 @@ height :: Int
 height = 9
 
 main :: Effect Unit
-main = runReactor reactor { title: "Bomberman", width, height }
+main = do 
+  x <- reactor 
+  runReactor x { title: "Bomberman", width, height }
 
 type Bomb = Int
 
@@ -48,20 +68,27 @@ isCorner { x, y } = (x == 1 || x == width - 2) && (y == 1 || y == height - 2)
 --   x <- liftEffect (randomInt 1 3)
 ---   x
 
-isBox :: Coordinates -> Boolean
-isBox { x, y } = 
-  if isWall {x, y} || isCorner {x, y} then false
-  else if unsafePerformEffect (randomInt 1 3) == 1 then false
-  else true
+isBox :: Coordinates -> Effect Boolean
+isBox { x, y } = do
+  h <- (randomInt 1 3)
+  if isWall {x, y} || isCorner {x, y} then pure false
+  else if h == 1 then pure false
+  else pure true
 
 
-reactor :: Reactor World
-reactor = { initial, draw, handleEvent, isPaused: const true }
+reactor :: Effect (Reactor World)
+reactor = do
+  x <- initial
+  pure { initial: x, draw, handleEvent, isPaused: const true }
 
-initial :: World
-initial = { player: { x: 1, y: 1}, board }
+initial :: Effect World
+initial = do
+  b <- board
+  pure { board: b, player: { x: 1, y: 1}}
   where
-  board = Grid.construct width height (\point -> if isWall point then Wall else if isBox point then Box else Empty)
+  board = constructM width height (\point -> do
+    x <- isBox point
+    if isWall point then pure Wall else if x then pure Box else pure Empty)
 
 draw :: World -> Drawing
 draw { player, board } = do
@@ -101,3 +128,34 @@ updateGrid cords board = do
   case newBoard of 
     Nothing -> board
     Just x -> x
+
+
+
+flipIts :: forall a. List (Effect a) -> List a
+flipIts Nil = Nil 
+flipIts (Cons f r) = Cons (unsafePerformEffect f) (flipIts r)
+
+flipIt :: forall a m. Monad m => List (m a) -> m (List a)
+flipIt Nil = pure Nil
+flipIt (Cons f r) = do
+  x <- f
+  y <- flipIt r
+  pure $ Cons x y
+
+coolerFlipIt :: forall a b m. Monad m => List a -> (a -> m b) -> m (List b)
+coolerFlipIt Nil _ = pure Nil 
+coolerFlipIt (Cons f r) func = do
+  x <- func f
+  y <- coolerFlipIt r func
+  pure $ Cons x y
+
+to2D :: Int -> Int -> Coordinates
+to2D width i = { x: i `mod` width, y: i / width }
+
+constructM :: forall a. Int -> Int -> (Coordinates -> Effect a) -> Effect (Grid a )
+constructM width height f = do
+  (tiles :: Array a) <- tilesM
+  pure (Grid tiles { width, height })
+  where
+  tilesM = map (Array.fromFoldable) (flipIt (List.fromFoldable xs)) 
+  xs = map (f <<< to2D width) $0 .. (width * height)
