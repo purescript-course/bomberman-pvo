@@ -12,7 +12,20 @@ to generate this file without the comments in this block.
 -}
 { name = "my-project"
 , dependencies =
-  [ "debug", "effect", "grid-reactors", "maybe", "prelude", "psci-support" ]
+  [ "arrays"
+  , "debug"
+  , "effect"
+  , "grid-reactors"
+  , "halogen"
+  , "integers"
+  , "lists"
+  , "maybe"
+  , "prelude"
+  , "psci-support"
+  , "random"
+  , "tuples"
+  , "typelevel-prelude"
+  ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
 }
