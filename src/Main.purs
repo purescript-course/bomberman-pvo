@@ -36,7 +36,7 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Effect (Effect)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
-import Halogen.HTML (elementNS)
+import Halogen.HTML (b, elementNS)
 import Reactor (Reactor, dimensions, executeDefaultBehavior, getW, runReactor, updateW_)
 import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
@@ -47,10 +47,10 @@ import Type.Data.Boolean (class Not)
 
 
 width :: Int
-width = 9
+width = 15
 
 height :: Int
-height = 9
+height = 15
 
 main :: Effect Unit
 main = do 
@@ -58,7 +58,8 @@ main = do
   runReactor x { title: "Bomberman", width, height }
 
 
-data Tile = Wall | Box | Bomb {time :: Int} | Explosion {time :: Int, r :: Int} | Empty
+data Tile = Wall | Box | Bomb {time :: Int} | Explosion {time :: Int} | Empty
+data Direction = Right | Left | Down | Up
 
 derive instance tileEq :: Eq Tile
 
@@ -150,10 +151,10 @@ updateBombs grid = do
   where
     x a = do
       case a of
-        Bomb {time: 0} -> Explosion{time: 50, r: 3}
+        Bomb {time: 0} -> Explosion{time: 50}
         Bomb {time} -> Bomb{time: time - 1}
         Explosion {time: 0} -> Empty
-        Explosion {time} -> Explosion{time: time -1, r: 3}
+        Explosion {time} -> Explosion{time: time -1}
         _ -> a
         
 
@@ -163,38 +164,39 @@ explosionCheck grid i board = do
   let x = (fromMaybe (Tuple {x:0,y:0} Empty) (Array.index grid i))
   if i > (height*width) then
     board
-  else if snd x == Explosion{time: 50, r: 3} then
+  else if snd x == Explosion{time: 50} then
     explode (fst x)
   else
-    explosionCheck grid (i+1) board
+    explosionCheck grid (i+1) board   
+
   where 
   explode :: Coordinates -> Grid Tile
   explode {x,y} = do
 
-    let a = explodeX {x,y} 3 board
-    let b = explodeY {x,y} 3 a
-    Grid.updateAt' {x: x, y: y} (Explosion{time: 49, r: 3}) b
+    let a = megaExplode {x,y} 1 board Right
+    let b = megaExplode {x,y} 1 a Down
+    let c = megaExplode {x,y} 1 b Left
+    let d = megaExplode {x,y} 1 c Up
+    Grid.updateAt' {x: x, y: y} (Explosion{time: 49}) d
 
-  explodeX :: Coordinates -> Int -> Grid Tile -> Grid Tile
-  explodeX {x,y} r grid = 
-    case (fromMaybe Empty (Grid.index grid {x:x+r, y})) of
+  megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Grid Tile
+  megaExplode {x,y} r grid dir = do
+    let newCords = 
+              case dir of
+                Right -> {x: x+r, y}
+                Left -> {x: x-r, y}
+                Up -> {x, y: y-r}
+                Down -> {x, y: y+r}  
+    case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
+      Box -> Grid.updateAt' newCords (Explosion{time: 49}) grid
+      Bomb{time} -> Grid.updateAt' newCords (Explosion{time: 51}) grid
       _ ->
-          if r < -2 then
-            Grid.updateAt' {x: x+r, y: y} (Explosion{time: 49, r: 3}) grid
+          if r > 2 then
+            Grid.updateAt' newCords (Explosion{time: 49}) grid
           else
-            explodeX {x,y} (r-1) (Grid.updateAt' {x: x+r, y: y} (Explosion{time: 49, r: 3}) grid)
-
-  explodeY {x,y} r grid =
-    case (fromMaybe Empty (Grid.index grid {x:x, y:y+r})) of
-      Wall -> grid
-      _ ->
-        if r < -2 then
-          Grid.updateAt' {x: x, y: y+r} (Explosion{time: 49, r: 3}) grid
-        else
-          explodeY {x,y} (r-1) (Grid.updateAt' {x: x, y: y+r} (Explosion{time: 49, r: 3}) grid)
-
-
+            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 49}) grid) dir
+  
 
 
 flipIt :: forall a m. Monad m => List (m a) -> m (List a)
