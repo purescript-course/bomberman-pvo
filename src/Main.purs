@@ -24,16 +24,18 @@ import Data.Tuple
 import Debug
 import Prelude
 
+import Color.Scheme.X11 (turquoise)
 import Data.Array (filter, index)
 import Data.Array as Array
 import Data.Array.ST (withArray)
-import Data.Grid (Grid(..), Coordinates, construct, enumerate, updateAt', index)
+import Data.Grid (Grid(..), Coordinates, construct, enumerate, index, updateAt')
 import Data.Grid as Grid
 import Data.HeytingAlgebra.Generic (genericDisj)
 import Data.Int (even)
 import Data.List as List
 import Data.Maybe (Maybe(..), fromMaybe)
 import Effect (Effect)
+import Effect.Class (liftEffect)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
 import Halogen.HTML (b, elementNS)
@@ -43,6 +45,8 @@ import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction)
 import Type.Data.Boolean (class Not)
+import Web.HTML.Event.BeforeUnloadEvent.EventTypes (beforeunload)
+import Web.HTML.Event.EventTypes (offline)
 
 
 
@@ -63,7 +67,7 @@ data Direction = Right | Left | Down | Up
 
 derive instance tileEq :: Eq Tile
 
-type World = { player :: Coordinates, board :: Grid Tile}
+type World = { player :: Coordinates, enemy :: Coordinates, lastEnemyDir :: Int, board :: Grid Tile, timer :: Number, bombCooldown :: Number}
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -88,28 +92,29 @@ reactor = do
 initial :: Effect World
 initial = do
   b <- board
-  pure { board: b, player: { x: 1, y: 1}}
+  pure { board: b, player: { x: 1, y: 1}, enemy: { x: width - 2, y: height -2}, lastEnemyDir: 0, timer: 0.0, bombCooldown: 0.0}
   where
   board = constructM width height (\point -> do
     x <- isBox point
     if isWall point then pure Wall else if x then pure Box else pure Empty)
 
 draw :: World -> Drawing
-draw { player, board } = do
+draw { player, board, enemy } = do
   drawGrid board drawTile
-  fill Color.blue400 $ tile player
+  fill Color.blue600 $ tile player
+  fill Color.green600 $ tile enemy
   where
   drawTile tile = 
     case tile of
       Empty -> Just Color.green50
-      Box -> Just Color.blue500
+      Box -> Just Color.blue300
       Wall -> Just Color.gray500
       Bomb{time: _} -> Just Color.red500
       Explosion {time} -> Just Color.yellow700
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player, board} <- getW
+  {player, board, enemy, timer, lastEnemyDir, bombCooldown} <- getW
   let newBoard = updateGrid player board
   let updatedBombs = updateBombs board
   case event of
@@ -124,18 +129,54 @@ handleEvent event = do
         {board} <- getW
         let e = enumerate board
         let explosion = explosionCheck e 0 board
-        updateW_ {board: explosion}
+        bombBool <- liftEffect bombChance
+        if bombBool && (bombCooldown > 250.0) then do
+          let newBomb = updateGrid enemy board
+          updateW_ {board: newBomb, bombCooldown: 0.0}
+        else
+          if (timer / 7.0) == 1.0 then do
+            dir <- liftEffect (generateRandomDirection lastEnemyDir)
+            moveEnemy dir
+            updateW_ {board: explosion, timer: 0.0, bombCooldown: bombCooldown + 1.0}
+          else 
+            updateW_ {board: explosion, timer: timer + 1.0, bombCooldown: bombCooldown + 1.0}
 
     _ -> executeDefaultBehavior
 
-movePlayer :: { x :: Int, y :: Int } -> Reaction World
-movePlayer { x: xd, y: yd } = do
-  { player: { x, y }, board } <- getW
-  let newPlayerPosition = { x: x + xd, y: y + yd }
-  when (isEmpty newPlayerPosition board) $
-    updateW_ { player: newPlayerPosition }
+generateRandomDirection :: Int -> Effect Coordinates
+generateRandomDirection lastDir = do
+  h <- (randomInt 1 5)
+  case h of
+    1 -> if lastDir == 2 then pure {x:0,y:0} else pure { x: -1, y: 0 }
+    2 -> if lastDir == 1 then pure {x:0,y:0} else pure { x: 1, y: 0 }
+    3 -> if lastDir == 4 then pure {x:0,y:0} else pure { x: 0, y: 1 }
+    4 -> if lastDir == 3 then pure {x:0,y:0} else pure { x: 0, y: -1 }
+    _ -> pure {x:0,y:0}
+
+bombChance :: Effect Boolean
+bombChance = do
+  h <- (randomInt 1 5)
+  case h of
+    1 -> pure true
+    _ -> pure false
+
+moveEnemy :: Coordinates -> Reaction World
+moveEnemy { x: xd, y: yd } = do
+  { enemy: { x, y }, board, lastEnemyDir } <- getW
+  let newEnemyPosition = { x: x + xd, y: y + yd }
+  let lDir = case {x: xd, y: yd} of
+                { x: -1, y: 0 } -> 1
+                { x: 1, y: 0 } -> 2
+                { x: 0, y: 1 } -> 3 
+                { x: 0, y: -1 } -> 4
+                {x:_,y:_} -> lastEnemyDir
+  updateW_ {lastEnemyDir: lDir}
+  when (isEmpty newEnemyPosition board) $
+    updateW_ { enemy: newEnemyPosition}
   where
   isEmpty position board = Grid.index board position == Just Empty
+
+
 
 updateGrid :: Coordinates -> Grid Tile -> Grid Tile
 updateGrid cords board = do
@@ -157,8 +198,6 @@ updateBombs grid = do
         Explosion {time} -> Explosion{time: time -1}
         _ -> a
         
-
-
 explosionCheck :: Array (Tuple Coordinates Tile) -> Int -> Grid Tile -> Grid Tile
 explosionCheck grid i board = do
   let x = (fromMaybe (Tuple {x:0,y:0} Empty) (Array.index grid i))
@@ -197,6 +236,18 @@ explosionCheck grid i board = do
           else
             megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 49}) grid) dir
   
+
+movePlayer :: { x :: Int, y :: Int } -> Reaction World
+movePlayer { x: xd, y: yd } = do
+  { player: { x, y }, board } <- getW
+  let newPlayerPosition = { x: x + xd, y: y + yd }
+  when (isEmpty newPlayerPosition board) $
+    updateW_ { player: newPlayerPosition }
+  where
+  isEmpty position board = Grid.index board position == Just Empty
+
+
+
 
 
 flipIt :: forall a m. Monad m => List (m a) -> m (List a)
