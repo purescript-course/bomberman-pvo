@@ -34,22 +34,23 @@ import Data.HeytingAlgebra.Generic (genericDisj)
 import Data.Int (even)
 import Data.List as List
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Tuple.Nested ((/\))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
 import Halogen.HTML (b, elementNS)
-import Reactor (Reactor, dimensions, executeDefaultBehavior, getW, runReactor, updateW_)
+import Reactor (Reactor, Widget(..), dimensions, executeDefaultBehavior, getW, runReactor, updateW_)
 import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
-import Reactor.Reaction (Reaction)
+import Reactor.Reaction (Reaction, widget)
 import Type.Data.Boolean (class Not)
 import Web.HTML.Event.BeforeUnloadEvent.EventTypes (beforeunload)
 import Web.HTML.Event.EventTypes (offline)
 
-
-
+playerMaxHp :: Int
+playerMaxHp = 100
 width :: Int
 width = 15
 
@@ -59,7 +60,11 @@ height = 15
 main :: Effect Unit
 main = do 
   x <- reactor 
-  runReactor x { title: "Bomberman", width, height }
+  runReactor x { title: "Bomberman", width, height,  
+        widgets: [
+          "section_hp" /\ Section {title: "Health"},
+          "label_hp" /\ Label {content: show $ playerMaxHp}
+        ]  }
 
 
 data Tile = Wall | Box | Bomb {time :: Int} | Explosion {time :: Int} | Empty
@@ -67,7 +72,13 @@ data Direction = Right | Left | Down | Up
 
 derive instance tileEq :: Eq Tile
 
-type World = { player :: Coordinates, enemy :: Coordinates, lastEnemyDir :: Int, board :: Grid Tile, timer :: Number, bombCooldown :: Number}
+type World = { 
+  player :: {coordinates :: Coordinates, playerHealth :: Int}, 
+  enemy :: Coordinates, 
+  lastEnemyDir :: Int, 
+  board :: Grid Tile, 
+  timer :: Number, 
+  bombCooldown :: Number}
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -87,21 +98,32 @@ isBox { x, y } = do
 reactor :: Effect (Reactor World)
 reactor = do
   x <- initial
-  pure { initial: x, draw, handleEvent, isPaused: const false }
+  pure {initial: x, 
+        draw, 
+        handleEvent, 
+        isPaused: const false
+        }
 
 initial :: Effect World
 initial = do
   b <- board
-  pure { board: b, player: { x: 1, y: 1}, enemy: { x: width - 2, y: height -2}, lastEnemyDir: 0, timer: 0.0, bombCooldown: 0.0}
+  pure { 
+        board: b, 
+        player: {coordinates: { x: 1, y: 1}, playerHealth: 100}, 
+        enemy: { x: width - 2, y: height -2}, 
+        lastEnemyDir: 0, 
+        timer: 0.0, 
+        bombCooldown: 0.0
+        }
   where
   board = constructM width height (\point -> do
     x <- isBox point
     if isWall point then pure Wall else if x then pure Box else pure Empty)
 
 draw :: World -> Drawing
-draw { player, board, enemy } = do
+draw { player: p@{ coordinates, playerHealth }, board, enemy } = do
   drawGrid board drawTile
-  fill Color.blue600 $ tile player
+  fill Color.blue600 $ tile coordinates
   fill Color.green600 $ tile enemy
   where
   drawTile tile = 
@@ -114,8 +136,8 @@ draw { player, board, enemy } = do
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player, board, enemy, timer, lastEnemyDir, bombCooldown} <- getW
-  let newBoard = updateGrid player board
+  {player: p@{ coordinates, playerHealth }, board, enemy, timer, lastEnemyDir, bombCooldown} <- getW
+  let newBoard = updateGrid coordinates board
   let updatedBombs = updateBombs board
   case event of
     KeyPress { key: "ArrowLeft" } -> movePlayer { x: -1, y: 0 }
@@ -126,22 +148,41 @@ handleEvent event = do
     Tick {delta} ->
       do
         updateW_ {board: updatedBombs}
-        {board} <- getW
+        {board, player: p@{ coordinates, playerHealth }} <- getW        
         let e = enumerate board
         let explosion = explosionCheck e 0 board
         bombBool <- liftEffect bombChance
-        if bombBool && (bombCooldown > 250.0) then do
-          let newBomb = updateGrid enemy board
-          updateW_ {board: newBomb, bombCooldown: 0.0}
+        reducePlayerHealth
+        if playerHealth == 0 then do
+          restart <- liftEffect initial
+          updateW_ restart
         else
-          if (timer / 7.0) == 1.0 then do
-            dir <- liftEffect (generateRandomDirection lastEnemyDir)
-            moveEnemy dir
-            updateW_ {board: explosion, timer: 0.0, bombCooldown: bombCooldown + 1.0}
-          else 
-            updateW_ {board: explosion, timer: timer + 1.0, bombCooldown: bombCooldown + 1.0}
+          if bombBool && (bombCooldown > 250.0) then do
+            let newBomb = updateGrid enemy board
+            updateW_ {board: newBomb, bombCooldown: 0.0}
+          else
+            if (timer / 7.0) == 1.0 then do
+              dir <- liftEffect (generateRandomDirection lastEnemyDir)
+              moveEnemy dir
+              updateW_ {board: explosion, timer: 0.0, bombCooldown: bombCooldown + 1.0}
+            else 
+              updateW_ {board: explosion, timer: timer + 1.0, bombCooldown: bombCooldown + 1.0}
 
     _ -> executeDefaultBehavior
+
+
+reducePlayerHealth = do
+  {player: p@{ coordinates, playerHealth }, board} <- getW
+  when (isExplosion coordinates board) $
+    updateW_ { player: p {playerHealth = playerHealth - 1} }
+  widget "label_hp" $ Label {content: show playerHealth}
+  where
+    isExplosion position board = 
+      case Grid.index board position of
+        Nothing -> false
+        Just (Explosion {time}) -> true
+        _ -> false
+
 
 generateRandomDirection :: Int -> Effect Coordinates
 generateRandomDirection lastDir = do
@@ -192,7 +233,7 @@ updateBombs grid = do
   where
     x a = do
       case a of
-        Bomb {time: 0} -> Explosion{time: 50}
+        Bomb {time: 0} -> Explosion{time: 30}
         Bomb {time} -> Bomb{time: time - 1}
         Explosion {time: 0} -> Empty
         Explosion {time} -> Explosion{time: time -1}
@@ -203,7 +244,7 @@ explosionCheck grid i board = do
   let x = (fromMaybe (Tuple {x:0,y:0} Empty) (Array.index grid i))
   if i > (height*width) then
     board
-  else if snd x == Explosion{time: 50} then
+  else if snd x == Explosion{time: 30} then
     explode (fst x)
   else
     explosionCheck grid (i+1) board   
@@ -216,7 +257,7 @@ explosionCheck grid i board = do
     let b = megaExplode {x,y} 1 a Down
     let c = megaExplode {x,y} 1 b Left
     let d = megaExplode {x,y} 1 c Up
-    Grid.updateAt' {x: x, y: y} (Explosion{time: 49}) d
+    Grid.updateAt' {x: x, y: y} (Explosion{time: 29}) d
 
   megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Grid Tile
   megaExplode {x,y} r grid dir = do
@@ -228,21 +269,23 @@ explosionCheck grid i board = do
                 Down -> {x, y: y+r}  
     case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
-      Box -> Grid.updateAt' newCords (Explosion{time: 49}) grid
-      Bomb{time} -> Grid.updateAt' newCords (Explosion{time: 51}) grid
+      Box -> Grid.updateAt' newCords (Explosion{time: 29}) grid
+      Bomb{time} -> Grid.updateAt' newCords (Explosion{time: 31}) grid
       _ ->
           if r > 2 then
-            Grid.updateAt' newCords (Explosion{time: 49}) grid
+            Grid.updateAt' newCords (Explosion{time: 29}) grid
           else
-            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 49}) grid) dir
+            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29}) grid) dir
   
 
 movePlayer :: { x :: Int, y :: Int } -> Reaction World
 movePlayer { x: xd, y: yd } = do
-  { player: { x, y }, board } <- getW
+  { player: p@{ coordinates, playerHealth }, board } <- getW
+  let x = coordinates.x
+  let y = coordinates.y
   let newPlayerPosition = { x: x + xd, y: y + yd }
   when (isEmpty newPlayerPosition board) $
-    updateW_ { player: newPlayerPosition }
+    updateW_ { player: p {coordinates = newPlayerPosition} }
   where
   isEmpty position board = Grid.index board position == Just Empty
 
