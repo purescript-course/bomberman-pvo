@@ -19,35 +19,32 @@ module Main
   )
   where
 
-import Data.List
-import Data.Tuple
 import Debug
 import Prelude
 
-import Color.Scheme.X11 (turquoise)
-import Data.Array (filter, index)
 import Data.Array as Array
-import Data.Array.ST (withArray)
-import Data.Grid (Grid(..), Coordinates, construct, enumerate, index, updateAt')
+import Data.Array.NonEmpty (last)
+import Data.Foldable (for_)
+import Data.Grid (Grid(..), Coordinates, enumerate)
 import Data.Grid as Grid
-import Data.HeytingAlgebra.Generic (genericDisj)
 import Data.Int (even)
+import Data.List (List(..), (..), (:), filter)
 import Data.List as List
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Tuple (Tuple(..), fst, snd)
 import Data.Tuple.Nested ((/\))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
-import Halogen.HTML (b, elementNS)
-import Reactor (Reactor, Widget(..), dimensions, executeDefaultBehavior, getW, runReactor, updateW_)
+import Halogen.HTML (elementNS)
+import Reactor (Reactor, Widget(..), executeDefaultBehavior, getW, runReactor, updateW_)
 import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction, widget)
-import Type.Data.Boolean (class Not)
-import Web.HTML.Event.BeforeUnloadEvent.EventTypes (beforeunload)
-import Web.HTML.Event.EventTypes (offline)
+
+
 
 playerMaxHp :: Int
 playerMaxHp = 100
@@ -74,11 +71,10 @@ derive instance tileEq :: Eq Tile
 
 type World = { 
   player :: {coordinates :: Coordinates, playerHealth :: Int}, 
-  enemy :: Coordinates, 
-  lastEnemyDir :: Int, 
+  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Int},  
   board :: Grid Tile, 
-  timer :: Number, 
-  bombCooldown :: Number}
+  timer :: Int, 
+  bombCooldown :: Int}
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -110,10 +106,9 @@ initial = do
   pure { 
         board: b, 
         player: {coordinates: { x: 1, y: 1}, playerHealth: 100}, 
-        enemy: { x: width - 2, y: height -2}, 
-        lastEnemyDir: 0, 
-        timer: 0.0, 
-        bombCooldown: 0.0
+        enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: 0} : {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: 0} : Nil),  
+        timer: 0, 
+        bombCooldown: 0
         }
   where
   board = constructM width height (\point -> do
@@ -121,22 +116,26 @@ initial = do
     if isWall point then pure Wall else if x then pure Box else pure Empty)
 
 draw :: World -> Drawing
-draw { player: p@{ coordinates, playerHealth }, board, enemy } = do
+draw { player: { coordinates}, board, enemy } = do
   drawGrid board drawTile
   fill Color.blue600 $ tile coordinates
-  fill Color.green600 $ tile enemy
+  drawEnemies enemy
   where
+  drawEnemies Nil = fill Color.gray500 $ tile {x:0,y:0}
+  drawEnemies (Cons f r) = do
+    fill Color.green600 $ tile f.enemyCoordinates
+    drawEnemies r
   drawTile tile = 
     case tile of
       Empty -> Just Color.green50
       Box -> Just Color.blue300
       Wall -> Just Color.gray500
       Bomb{time: _} -> Just Color.red500
-      Explosion {time} -> Just Color.yellow700
+      Explosion {} -> Just Color.yellow700
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player: p@{ coordinates, playerHealth }, board, enemy, timer, lastEnemyDir, bombCooldown} <- getW
+  {player:{ coordinates }, board, enemy, timer} <- getW
   let newBoard = updateGrid coordinates board
   let updatedBombs = updateBombs board
   case event of
@@ -145,32 +144,77 @@ handleEvent event = do
     KeyPress { key: "ArrowDown" } -> movePlayer { x: 0, y: 1 }
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
     KeyPress { key: " " } -> updateW_ {board: newBoard}
-    Tick {delta} ->
-      do
-        updateW_ {board: updatedBombs}
-        {board, player: p@{ coordinates, playerHealth }} <- getW        
-        let e = enumerate board
-        let explosion = explosionCheck e 0 board
-        bombBool <- liftEffect bombChance
-        reducePlayerHealth
-        if playerHealth == 0 then do
-          restart <- liftEffect initial
-          updateW_ restart
-        else
-          if bombBool && (bombCooldown > 250.0) then do
-            let newBomb = updateGrid enemy board
-            updateW_ {board: newBomb, bombCooldown: 0.0}
-          else
-            if (timer / 7.0) == 1.0 then do
-              dir <- liftEffect (generateRandomDirection lastEnemyDir)
-              moveEnemy dir
-              updateW_ {board: explosion, timer: 0.0, bombCooldown: bombCooldown + 1.0}
-            else 
-              updateW_ {board: explosion, timer: timer + 1.0, bombCooldown: bombCooldown + 1.0}
+    Tick {} -> do
+      progressEnemyCooldowns
+      let makeEnemiesMove = mapEnemies enemy timer board
+
+      --this is really scuffed, but it works for now ,:D
+      let enemyBombs = mapEnemyBombs enemy timer 
+      let poi = filter (_ /= {x:0,y:0}) enemyBombs
+      let newEnemyBomb = updateGrid (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs
+      updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
+      reducePlayerHealth
+      checkPlayerHealth
+      
 
     _ -> executeDefaultBehavior
+  where
+    mapEnemies Nil _ _ = Nil
+    mapEnemies (Cons f r) timer board =
+      (enemyAction f timer board) : (mapEnemies r timer board)
+
+    mapEnemyBombs Nil _ = Nil
+    mapEnemyBombs (Cons f r) timer =
+      (enemyPlaceBomb f timer) : (mapEnemyBombs r timer)
+
+    checkPlayerHealth = do
+      {player: {playerHealth}} <- getW
+      if playerHealth == 0 then do
+          restart <- liftEffect initial
+          updateW_ restart
+      else
+        executeDefaultBehavior
+
+    bombChance :: Effect Boolean
+    bombChance = do
+      h <- (randomInt 1 5)
+      case h of
+        1 -> pure true
+        _ -> pure false
+    
+    enemyPlaceBomb {enemyCoordinates} timer =
+      let 
+        bombBool = unsafePerformEffect bombChance
+      in
+        if bombBool && ((timer `mod` 50) == 0) then do
+          enemyCoordinates
+        else
+          {x:0,y:0}
+
+    --enemyAction :: {enemyCoordinates :: Coordinates, lastEnemyDir :: Int} -> Number -> Grid Tile
+    enemyAction enemy@{enemyCoordinates, lastEnemyDir} timer board =
+      case Grid.index board enemyCoordinates of
+          Nothing -> enemy
+          Just (Explosion {}) -> {enemyCoordinates: {x:0,y:0}, lastEnemyDir}
+          _ ->
+            if ((timer `mod` 7) == 1) then 
+              let 
+                dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
+              in
+                moveEnemy board dir enemy
+            else
+              enemy
+
+    progressEnemyCooldowns = do
+      {board, bombCooldown, timer} <- getW        
+      let e = enumerate board
+      let explosion = explosionCheck e 0 board
+      updateW_ {board: explosion, timer: timer + 1, bombCooldown: bombCooldown + 1}
+      executeDefaultBehavior
+    
 
 
+reducePlayerHealth :: Reaction World
 reducePlayerHealth = do
   {player: p@{ coordinates, playerHealth }, board} <- getW
   when (isExplosion coordinates board) $
@@ -180,7 +224,7 @@ reducePlayerHealth = do
     isExplosion position board = 
       case Grid.index board position of
         Nothing -> false
-        Just (Explosion {time}) -> true
+        Just (Explosion {}) -> true
         _ -> false
 
 
@@ -194,29 +238,24 @@ generateRandomDirection lastDir = do
     4 -> if lastDir == 3 then pure {x:0,y:0} else pure { x: 0, y: -1 }
     _ -> pure {x:0,y:0}
 
-bombChance :: Effect Boolean
-bombChance = do
-  h <- (randomInt 1 5)
-  case h of
-    1 -> pure true
-    _ -> pure false
 
-moveEnemy :: Coordinates -> Reaction World
-moveEnemy { x: xd, y: yd } = do
-  { enemy: { x, y }, board, lastEnemyDir } <- getW
-  let newEnemyPosition = { x: x + xd, y: y + yd }
-  let lDir = case {x: xd, y: yd} of
-                { x: -1, y: 0 } -> 1
-                { x: 1, y: 0 } -> 2
-                { x: 0, y: 1 } -> 3 
-                { x: 0, y: -1 } -> 4
-                {x:_,y:_} -> lastEnemyDir
-  updateW_ {lastEnemyDir: lDir}
-  when (isEmpty newEnemyPosition board) $
-    updateW_ { enemy: newEnemyPosition}
+moveEnemy :: Grid Tile -> Coordinates -> 
+  {enemyCoordinates :: Coordinates, lastEnemyDir :: Int} -> 
+  {enemyCoordinates :: Coordinates, lastEnemyDir :: Int}
+moveEnemy board { x: xd, y: yd } {enemyCoordinates: {x,y}, lastEnemyDir}=
+  if (isEmpty newEnemyPosition board) then
+    {enemyCoordinates: newEnemyPosition, lastEnemyDir: lDir}
+  else
+    {enemyCoordinates:{x,y}, lastEnemyDir}
   where
   isEmpty position board = Grid.index board position == Just Empty
-
+  newEnemyPosition = { x: x + xd, y: y + yd }
+  lDir = case {x: xd, y: yd} of
+              { x: -1, y: 0 } -> 1
+              { x: 1, y: 0 } -> 2
+              { x: 0, y: 1 } -> 3 
+              { x: 0, y: -1 } -> 4
+              {x:_,y:_} -> 0
 
 
 updateGrid :: Coordinates -> Grid Tile -> Grid Tile
@@ -270,7 +309,7 @@ explosionCheck grid i board = do
     case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
       Box -> Grid.updateAt' newCords (Explosion{time: 29}) grid
-      Bomb{time} -> Grid.updateAt' newCords (Explosion{time: 31}) grid
+      Bomb{} -> Grid.updateAt' newCords (Explosion{time: 31}) grid
       _ ->
           if r > 2 then
             Grid.updateAt' newCords (Explosion{time: 29}) grid
@@ -280,7 +319,7 @@ explosionCheck grid i board = do
 
 movePlayer :: { x :: Int, y :: Int } -> Reaction World
 movePlayer { x: xd, y: yd } = do
-  { player: p@{ coordinates, playerHealth }, board } <- getW
+  { player: p@{ coordinates }, board } <- getW
   let x = coordinates.x
   let y = coordinates.y
   let newPlayerPosition = { x: x + xd, y: y + yd }
@@ -307,8 +346,8 @@ coolerFlipIt (Cons f r) func = do
   y <- coolerFlipIt r func
   pure $ Cons x y-}
 
-to2D :: Int -> Int -> Coordinates
-to2D width i = { x: i `mod` width, y: i / width }
+to2D :: Int -> Coordinates
+to2D i = { x: i `mod` width, y: i / width }
 
 constructM :: forall a. Int -> Int -> (Coordinates -> Effect a) -> Effect (Grid a )
 constructM width height f = do
@@ -316,4 +355,4 @@ constructM width height f = do
   pure (Grid tiles { width, height })
   where
   tilesM = map (Array.fromFoldable) (flipIt (List.fromFoldable xs)) 
-  xs = map (f <<< to2D width) $0 .. (width * height)
+  xs = map (f <<< to2D ) $0 .. (width * height)
