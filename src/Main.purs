@@ -73,8 +73,7 @@ type World = {
   player :: {coordinates :: Coordinates, playerHealth :: Int}, 
   enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Int},  
   board :: Grid Tile, 
-  timer :: Int, 
-  bombCooldown :: Int}
+  timer :: Int}
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -107,8 +106,7 @@ initial = do
         board: b, 
         player: {coordinates: { x: 1, y: 1}, playerHealth: 100}, 
         enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: 0} : {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: 0} : Nil),  
-        timer: 0, 
-        bombCooldown: 0
+        timer: 0
         }
   where
   board = constructM width height (\point -> do
@@ -145,7 +143,7 @@ handleEvent event = do
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
     KeyPress { key: " " } -> updateW_ {board: newBoard}
     Tick {} -> do
-      progressEnemyCooldowns
+      
       let makeEnemiesMove = mapEnemies enemy timer board
 
       --this is really scuffed, but it works for now ,:D
@@ -155,6 +153,8 @@ handleEvent event = do
       updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
       reducePlayerHealth
       checkPlayerHealth
+      --progressEnemyCooldowns has to be under updateW_ for explosions to work
+      progressEnemyCooldowns
       
 
     _ -> executeDefaultBehavior
@@ -206,10 +206,10 @@ handleEvent event = do
               enemy
 
     progressEnemyCooldowns = do
-      {board, bombCooldown, timer} <- getW        
+      {board, timer} <- getW        
       let e = enumerate board
       let explosion = explosionCheck e 0 board
-      updateW_ {board: explosion, timer: timer + 1, bombCooldown: bombCooldown + 1}
+      updateW_ {board: explosion, timer: timer + 1}
       executeDefaultBehavior
     
 
