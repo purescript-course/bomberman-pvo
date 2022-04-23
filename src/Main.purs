@@ -1,6 +1,8 @@
 module Main
-  ( Tile(..)
+  ( Direction(..)
+  , Tile(..)
   , World
+  , Owner
   , constructM
   , draw
   , flipIt
@@ -23,8 +25,6 @@ import Debug
 import Prelude
 
 import Data.Array as Array
-import Data.Array.NonEmpty (last)
-import Data.Foldable (for_)
 import Data.Grid (Grid(..), Coordinates, enumerate)
 import Data.Grid as Grid
 import Data.Int (even)
@@ -37,7 +37,6 @@ import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Random (randomInt)
 import Effect.Unsafe (unsafePerformEffect)
-import Halogen.HTML (elementNS)
 import Reactor (Reactor, Widget(..), executeDefaultBehavior, getW, runReactor, updateW_)
 import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
@@ -63,15 +62,17 @@ main = do
           "label_hp" /\ Label {content: show $ playerMaxHp}
         ]  }
 
-
-data Tile = Wall | Box | Bomb {time :: Int} | Explosion {time :: Int} | Empty
+data Owner = Player | AI
+data Tile = Wall | Box | Bomb {time :: Int, owner :: Owner} | Explosion {time :: Int, owner :: Owner} | Empty
 data Direction = Right | Left | Down | Up
+
+derive instance ownerEq :: Eq Owner
 
 derive instance tileEq :: Eq Tile
 
 type World = { 
   player :: {coordinates :: Coordinates, playerHealth :: Int}, 
-  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Int},  
+  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Int},
   board :: Grid Tile, 
   timer :: Int}
 
@@ -134,7 +135,7 @@ draw { player: { coordinates}, board, enemy } = do
 handleEvent :: Event -> Reaction World
 handleEvent event = do
   {player:{ coordinates }, board, enemy, timer} <- getW
-  let newBoard = updateGrid coordinates board
+  let newBoard = updateGrid coordinates board Player
   let updatedBombs = updateBombs board
   case event of
     KeyPress { key: "ArrowLeft" } -> movePlayer { x: -1, y: 0 }
@@ -149,8 +150,9 @@ handleEvent event = do
       --this is really scuffed, but it works for now ,:D
       let enemyBombs = mapEnemyBombs enemy timer 
       let poi = filter (_ /= {x:0,y:0}) enemyBombs
-      let newEnemyBomb = updateGrid (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs
+      let newEnemyBomb = updateGrid (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs AI
       updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
+
       reducePlayerHealth
       checkPlayerHealth
       --progressEnemyCooldowns has to be under updateW_ for explosions to work
@@ -195,7 +197,7 @@ handleEvent event = do
     enemyAction enemy@{enemyCoordinates, lastEnemyDir} timer board =
       case Grid.index board enemyCoordinates of
           Nothing -> enemy
-          Just (Explosion {}) -> {enemyCoordinates: {x:0,y:0}, lastEnemyDir}
+          Just (Explosion {owner: Player}) -> {enemyCoordinates: {x:0,y:0}, lastEnemyDir}
           _ ->
             if ((timer `mod` 7) == 1) then 
               let 
@@ -258,9 +260,9 @@ moveEnemy board { x: xd, y: yd } {enemyCoordinates: {x,y}, lastEnemyDir}=
               {x:_,y:_} -> 0
 
 
-updateGrid :: Coordinates -> Grid Tile -> Grid Tile
-updateGrid cords board = do
-  let newBoard = (Grid.updateAt cords (Bomb{time: 50}) board)
+updateGrid :: Coordinates -> Grid Tile -> Owner -> Grid Tile
+updateGrid cords board ownr = do
+  let newBoard = (Grid.updateAt cords (Bomb{time: 50, owner: ownr}) board)
   case newBoard of 
     Nothing -> board
     Just x -> x
@@ -272,10 +274,10 @@ updateBombs grid = do
   where
     x a = do
       case a of
-        Bomb {time: 0} -> Explosion{time: 30}
-        Bomb {time} -> Bomb{time: time - 1}
+        Bomb {time: 0, owner} -> spy "" Explosion{time: 30, owner: owner}
+        Bomb {time, owner} -> Bomb{time: time - 1, owner}
         Explosion {time: 0} -> Empty
-        Explosion {time} -> Explosion{time: time -1}
+        Explosion {time, owner} -> Explosion{time: time -1, owner}
         _ -> a
         
 explosionCheck :: Array (Tuple Coordinates Tile) -> Int -> Grid Tile -> Grid Tile
@@ -283,23 +285,25 @@ explosionCheck grid i board = do
   let x = (fromMaybe (Tuple {x:0,y:0} Empty) (Array.index grid i))
   if i > (height*width) then
     board
-  else if snd x == Explosion{time: 30} then
-    explode (fst x)
+  else if (snd x == Explosion{time: 30, owner: Player}) then
+    explode (fst x) Player
+  else if (snd x == Explosion{time: 30, owner: AI}) then
+    explode (fst x) AI
   else
     explosionCheck grid (i+1) board   
 
   where 
-  explode :: Coordinates -> Grid Tile
-  explode {x,y} = do
+  explode :: Coordinates -> Owner -> Grid Tile
+  explode {x,y} ownr = do
 
-    let a = megaExplode {x,y} 1 board Right
-    let b = megaExplode {x,y} 1 a Down
-    let c = megaExplode {x,y} 1 b Left
-    let d = megaExplode {x,y} 1 c Up
-    Grid.updateAt' {x: x, y: y} (Explosion{time: 29}) d
+    let a = megaExplode {x,y} 1 board Right ownr
+    let b = megaExplode {x,y} 1 a Down ownr
+    let c = megaExplode {x,y} 1 b Left ownr
+    let d = megaExplode {x,y} 1 c Up ownr
+    Grid.updateAt' {x: x, y: y} (Explosion{time: 29, owner: ownr}) d
 
-  megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Grid Tile
-  megaExplode {x,y} r grid dir = do
+  megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Owner -> Grid Tile
+  megaExplode {x,y} r grid dir ownr = do
     let newCords = 
               case dir of
                 Right -> {x: x+r, y}
@@ -308,13 +312,13 @@ explosionCheck grid i board = do
                 Down -> {x, y: y+r}  
     case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
-      Box -> Grid.updateAt' newCords (Explosion{time: 29}) grid
-      Bomb{} -> Grid.updateAt' newCords (Explosion{time: 31}) grid
+      Box -> Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
+      Bomb{owner} -> Grid.updateAt' newCords (Explosion{time: 31, owner: owner}) grid
       _ ->
           if r > 2 then
-            Grid.updateAt' newCords (Explosion{time: 29}) grid
+            Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
           else
-            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29}) grid) dir
+            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid) dir ownr
   
 
 movePlayer :: { x :: Int, y :: Int } -> Reaction World
