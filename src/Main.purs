@@ -25,6 +25,7 @@ module Main
 
 import Prelude
 
+import Color.Scheme.X11 (turquoise)
 import Data.Array as Array
 import Data.Grid (Grid(..), Coordinates, enumerate)
 import Data.Grid as Grid
@@ -43,6 +44,7 @@ import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction, widget)
+import Web.HTML.Event.EventTypes (offline)
 
 
 
@@ -99,7 +101,8 @@ type World = {
     coordinates :: Coordinates, 
     playerHealth :: Int, 
     buff :: Buff, 
-    buffTimer :: Int}, 
+    buffTimer :: Int,
+    bombCount :: Int}, 
   enemy :: List{
     enemyCoordinates :: Coordinates, 
     lastEnemyDir :: Direction, 
@@ -150,7 +153,7 @@ initial = do
   b <- board
   pure { 
         board: b, 
-        player: {coordinates: { x: 1, y: 1}, playerHealth: playerMaxHP, buff: Default, buffTimer: 0}, 
+        player: {coordinates: { x: 1, y: 1}, playerHealth: playerMaxHP, buff: Default, buffTimer: 0, bombCount: 0}, 
         enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: height -2}, wasKilled: false} : 
           {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: 1, y: height -2}, wasKilled: false} :
           {enemyCoordinates: { x: width - 2, y: 1},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: 1}, wasKilled: false} : Nil),  
@@ -188,15 +191,19 @@ draw { player: { coordinates}, board, enemy } = do
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player:{ coordinates, buff }, board, enemy, timer, score} <- getW
+  {player: p@{ coordinates, buff, bombCount }, board, enemy, timer, score} <- getW
   let newBoard = placeBomb coordinates board Player
   let updatedBombs = updateBombs board
+  updateW_ {player: p{bombCount = snd updatedBombs}}
   case event of
     KeyPress { key: "ArrowLeft" } -> movePlayer { x: -1, y: 0 }
     KeyPress { key: "ArrowRight" } -> movePlayer { x: 1, y: 0 }
     KeyPress { key: "ArrowDown" } -> movePlayer { x: 0, y: 1 }
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
-    KeyPress { key: " " } -> updateW_ {board: newBoard}
+    KeyPress { key: " " } -> if bombCount > 2 then 
+        executeDefaultBehavior 
+      else 
+        updateW_ {board: newBoard}
     Tick {} -> do
       let makeEnemiesMove = mapEnemies enemy timer board buff
       let checkNewKills = length (filter (\x -> x.wasKilled) makeEnemiesMove)      
@@ -207,7 +214,7 @@ handleEvent event = do
       --this is really scuffed, but it works for now ,:D
       let enemyBombs = mapEnemyBombs enemy timer 
       let filteredBombs = filter (_ /= {x:0,y:0}) enemyBombs
-      let newEnemyBomb = placeBomb (fromMaybe {x:0,y:0} (List.head $ filteredBombs)) updatedBombs AI
+      let newEnemyBomb = placeBomb (fromMaybe {x:0,y:0} (List.head $ filteredBombs)) (fst updatedBombs) AI
       updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
       if buff /= Immortal then
         reducePlayerHealth
@@ -431,10 +438,10 @@ placeBomb cords board ownr = do
     Nothing -> board
     Just x -> x
 
-updateBombs :: Grid Tile -> Grid Tile
+updateBombs :: Grid Tile -> Tuple (Grid Tile) Int
 updateBombs grid = do
   let arr = Array.fromFoldable grid
-  Grid (map x arr) {height: height, width: width}
+  Tuple (Grid (map x arr) {height: height, width: width}) (Array.length $ Array.filter (asdf) arr)
   where
     x a = do
       case a of
@@ -443,6 +450,10 @@ updateBombs grid = do
         Explosion {time: 0} -> Empty
         Explosion {time, owner} -> Explosion{time: time - 1, owner}
         _ -> a
+    asdf a = 
+      case a of
+        Bomb {owner: Player} -> true
+        _ -> false
         
 explosionCheck :: Array (Tuple Coordinates Tile) -> Int -> Grid Tile -> Buff -> Grid Tile
 explosionCheck grid i board buff = do
