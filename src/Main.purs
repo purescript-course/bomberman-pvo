@@ -46,8 +46,8 @@ import Reactor.Reaction (Reaction, widget)
 
 
 
-playerStartingHp :: Int
-playerStartingHp = 100
+playerMaxHP :: Int
+playerMaxHP = 100
 
 globalRespawnTime :: Int
 globalRespawnTime = 375
@@ -64,7 +64,7 @@ main = do
   runReactor x { title: "Bomberman", width, height,  
         widgets: [
           "section_hp" /\ Section {title: "Health"},
-          "label_hp" /\ Label {content: show $ playerStartingHp},
+          "label_hp" /\ Label {content: show $ playerMaxHP},
           "section_score" /\ Section {title: "Score"},
           "label_score" /\ Label {content: show $ 0},
           "section_currentBuff" /\ Section {title: "Active Buff"},
@@ -72,14 +72,20 @@ main = do
         ]  }
 
 data Owner = Player | AI
-data Tile = Wall | Box | Bomb {time :: Int, owner :: Owner} | Explosion {time :: Int, owner :: Owner} | Buff {type :: Buff} | Empty
+data Tile = 
+  Wall | 
+  Box | 
+  Bomb {time :: Int, owner :: Owner} | 
+  Explosion {time :: Int, owner :: Owner} | 
+  Buff {type :: Buff} | 
+  Empty
 data Direction = Right | Left | Down | Up | None
 
-data Buff = Slow | Immortal | Heal | Power
+data Buff = Slow | Immortal | Heal | Power | Default
 {-
   slow - enemies move slower
   immortal - you cannot take damage for a while
-  heal - heals 25 hp
+  heal - heals 25 hp (but it cannot go over the maximum hp)
   power - makes explosions 1 larger and explosions can go through boxes, but they dont drop any buffs
 -}
 
@@ -89,8 +95,17 @@ derive instance directionEq :: Eq Direction
 derive instance tileEq :: Eq Tile
 
 type World = { 
-  player :: {coordinates :: Coordinates, playerHealth :: Int, buff :: Maybe Buff, buffTimer :: Int}, 
-  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean},
+  player :: {
+    coordinates :: Coordinates, 
+    playerHealth :: Int, 
+    buff :: Buff, 
+    buffTimer :: Int}, 
+  enemy :: List{
+    enemyCoordinates :: Coordinates, 
+    lastEnemyDir :: Direction, 
+    respawnTime :: Int, 
+    respawnCoordinates :: Coordinates, 
+    wasKilled :: Boolean},
   board :: Grid Tile, 
   timer :: Int,
   score :: Int
@@ -100,14 +115,24 @@ isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
 
 isCorner :: Coordinates -> Boolean
-isCorner { x, y } = (x == 1 || x == width - 2) && (y == 1 || y == height - 2)
+isCorner crds@{ x, y } = 
+  ((x == 1 || x == width - 2) && (y == 1 || y == height - 2)) || 
+  crds == {x:1,y:2} || 
+  crds == {x:2,y:1} || 
+  crds == {x:width - 2,y:2} || 
+  crds == {x:width - 3,y:1} || 
+  crds == {x:1,y:height - 3} || 
+  crds == {x:2,y:height - 2} ||
+  crds == {x:width - 2,y:height - 3} || 
+  crds == {x:width - 3,y:height - 2}
+
 
 
 isBox :: Coordinates -> Effect Boolean
 isBox { x, y } = do
-  h <- (randomInt 1 3)
+  rInt <- (randomInt 1 10)
   if isWall {x, y} || isCorner {x, y} then pure false
-  else if h < 3 then pure false
+  else if rInt < 6 then pure false
   else pure true
 
 
@@ -125,7 +150,7 @@ initial = do
   b <- board
   pure { 
         board: b, 
-        player: {coordinates: { x: 1, y: 1}, playerHealth: 100, buff: Nothing, buffTimer: 0}, 
+        player: {coordinates: { x: 1, y: 1}, playerHealth: playerMaxHP, buff: Default, buffTimer: 0}, 
         enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: height -2}, wasKilled: false} : 
           {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: 1, y: height -2}, wasKilled: false} :
           {enemyCoordinates: { x: width - 2, y: 1},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: 1}, wasKilled: false} : Nil),  
@@ -133,7 +158,7 @@ initial = do
         score: 0
         }
   where
-  board = constructM width height (\point -> do
+  board = constructM (\point -> do
     x <- isBox point
     if isWall point then pure Wall else if x then pure Box else pure Empty)
 
@@ -159,6 +184,7 @@ draw { player: { coordinates}, board, enemy } = do
       Buff {type: Immortal} -> Just Color.blue900
       Buff {type: Heal} -> Just Color.green900
       Buff {type: Power} -> Just Color.yellow800
+      _ -> Nothing
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
@@ -172,8 +198,7 @@ handleEvent event = do
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
     KeyPress { key: " " } -> updateW_ {board: newBoard}
     Tick {} -> do
-      let b = fromMaybe Heal buff 
-      let makeEnemiesMove = mapEnemies enemy timer board b
+      let makeEnemiesMove = mapEnemies enemy timer board buff
       let checkNewKills = length (filter (\x -> x.wasKilled) makeEnemiesMove)      
       updateW_ { score: score + checkNewKills} 
       widget "label_score" $ Label {content: show score}
@@ -181,10 +206,10 @@ handleEvent event = do
 
       --this is really scuffed, but it works for now ,:D
       let enemyBombs = mapEnemyBombs enemy timer 
-      let poi = filter (_ /= {x:0,y:0}) enemyBombs
-      let newEnemyBomb = placeBomb (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs AI
+      let filteredBombs = filter (_ /= {x:0,y:0}) enemyBombs
+      let newEnemyBomb = placeBomb (fromMaybe {x:0,y:0} (List.head $ filteredBombs)) updatedBombs AI
       updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
-      if b /= Immortal then
+      if buff /= Immortal then
         reducePlayerHealth
       else
         executeDefaultBehavior
@@ -194,17 +219,37 @@ handleEvent event = do
       
     _ -> executeDefaultBehavior
   where
-    mapEnemies :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
-      -> Int -> Grid Tile -> Buff -> 
-      List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
+    mapEnemies :: 
+      List{enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean} -> 
+      Int -> 
+      Grid Tile -> 
+      Buff -> 
+      List{enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean}
     mapEnemies Nil _ _ _ = Nil
     mapEnemies (Cons f r) timer board b =
       (enemyAction f timer board b) : (mapEnemies r timer board b)
 
+    mapEnemyBombs :: 
+      List{enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean} ->
+      Int ->
+      List Coordinates
     mapEnemyBombs Nil _ = Nil
     mapEnemyBombs (Cons f r) timer =
       (enemyPlaceBomb f timer) : (mapEnemyBombs r timer)
 
+    checkPlayerHealth :: Reaction World
     checkPlayerHealth = do
       {player: {playerHealth}} <- getW
       if playerHealth == 0 then do
@@ -219,9 +264,18 @@ handleEvent event = do
       case h of
         1 -> pure true
         _ -> pure false
-    
+
+    enemyPlaceBomb :: 
+      {enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean} -> 
+      Int -> 
+      Coordinates
     enemyPlaceBomb {enemyCoordinates} timer =
       let 
+        --I'm not sure how to get rid of this..
         bombBool = unsafePerformEffect bombChance
       in
         if bombBool && ((timer `mod` 50) == 0) then do
@@ -229,7 +283,20 @@ handleEvent event = do
         else
           {x:0,y:0}
 
-    --enemyAction :: {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction} -> Number -> Grid Tile
+    enemyAction :: 
+      {enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean} ->
+      Int ->
+      Grid Tile ->
+      Buff ->
+      {enemyCoordinates :: Coordinates, 
+        lastEnemyDir :: Direction, 
+        respawnTime :: Int, 
+        respawnCoordinates :: Coordinates, 
+        wasKilled :: Boolean}
     enemyAction enemy@{enemyCoordinates, lastEnemyDir, respawnTime, respawnCoordinates} timer board buff =
       let 
         speedDivision = if buff == Slow then 20 else 7
@@ -244,24 +311,26 @@ handleEvent event = do
               else
                 if ((timer `mod` (speedDivision)) == 1) then 
                   let 
+                    --Same with this
                     dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
                   in
                     moveEnemy board dir enemy
                 else
                   enemy { respawnTime = respawnTime - 1, wasKilled = false}
 
+    progressCooldowns :: Reaction World
     progressCooldowns = do
       {board, timer, player: p@{ buff, buffTimer}} <- getW        
       let e = enumerate board      
       case buff of
-        Nothing -> do
-          let explosion = explosionCheck e 0 board Heal
+        Default -> do
+          let explosion = explosionCheck e 0 board Default
           updateW_ {board: explosion, timer: timer + 1}
-        Just b -> do
-          let explosion = explosionCheck e 0 board b
+        _ -> do
+          let explosion = explosionCheck e 0 board buff
           updateW_ {board: explosion, timer: timer + 1}
           if buffTimer == 375 then do
-            updateW_ {player:p { buff = Nothing, buffTimer = 0}}
+            updateW_ {player:p { buff = Default, buffTimer = 0}}
             widget "label_currentBuff" $ Label {content: show "Nothing"}
           else
             updateW_ {player: p { buffTimer = buffTimer + 1 }}
@@ -277,9 +346,19 @@ generateRandomDirection lastDir = do
     4 -> if lastDir == Down then pure {x:0,y:0} else pure { x: 0, y: -1 }
     _ -> pure {x:0,y:0}
 
-moveEnemy :: Grid Tile -> Coordinates -> 
-  {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean} -> 
-  {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
+moveEnemy :: 
+  Grid Tile -> 
+  Coordinates -> 
+  {enemyCoordinates :: Coordinates, 
+    lastEnemyDir :: Direction, 
+    respawnTime :: Int, 
+    respawnCoordinates :: Coordinates, 
+    wasKilled :: Boolean} -> 
+  {enemyCoordinates :: Coordinates, 
+  lastEnemyDir :: Direction, 
+  respawnTime :: Int, 
+  respawnCoordinates :: Coordinates, 
+  wasKilled :: Boolean}
 moveEnemy board { x: xd, y: yd } enemy@{enemyCoordinates: {x,y}, respawnTime}=
   if (isEmpty newEnemyPosition board) then
     enemy {enemyCoordinates = newEnemyPosition, lastEnemyDir = lDir, respawnTime = respawnTime - 1, wasKilled = false}
@@ -320,24 +399,24 @@ movePlayer { x: xd, y: yd } = do
     Just Empty -> updateW_ { player: p {coordinates = newPlayerPosition} }
     Just (Buff {type: Slow}) -> do
       let newBoard = Grid.updateAt' newPlayerPosition Empty board 
-      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Slow, buffTimer = 0}}
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Slow, buffTimer = 0}}
       widget "label_currentBuff" $ Label {content: show "Slow"}    
 
     Just (Buff {type: Immortal}) -> do
       let newBoard = Grid.updateAt' newPlayerPosition Empty board 
-      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Immortal, buffTimer = 0}}
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Immortal, buffTimer = 0}}
       widget "label_currentBuff" $ Label {content: show "Immortal"}
 
     Just (Buff {type: Heal}) -> do
       let newHP = playerHealth + 25
       let newBoard = Grid.updateAt' newPlayerPosition Empty board 
       updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, 
-        playerHealth = if newHP > 100 then 100 else newHP, buff = Nothing, buffTimer = 0}}
+        playerHealth = if newHP > playerMaxHP then playerMaxHP else newHP, buff = Default, buffTimer = 0}}
       widget "label_currentBuff" $ Label {content: show "Nothing"}
 
     Just (Buff {type: Power}) -> do
       let newBoard = Grid.updateAt' newPlayerPosition Empty board 
-      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Power, buffTimer = 0}}
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Power, buffTimer = 0}}
       widget "label_currentBuff" $ Label {content: show "Power"}
 
     _ -> executeDefaultBehavior
@@ -416,6 +495,7 @@ explosionCheck grid i board buff = do
   generateRandomBuff :: Owner -> Tile
   generateRandomBuff ownr = 
     let
+      --Neither here :(
       h = unsafePerformEffect (randomInt 1 5)
     in
       case h of
@@ -441,8 +521,8 @@ flipIt (Cons f r) = do
 to2D :: Int -> Coordinates
 to2D i = { x: i `mod` width, y: i / width }
 
-constructM :: forall a. Int -> Int -> (Coordinates -> Effect a) -> Effect (Grid a )
-constructM width height f = do
+constructM :: forall a. (Coordinates -> Effect a) -> Effect (Grid a )
+constructM f = do
   (tiles :: Array a) <- tilesM
   pure (Grid tiles { width, height })
   where
