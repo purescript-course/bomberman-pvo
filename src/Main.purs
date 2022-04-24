@@ -28,7 +28,7 @@ import Data.Array as Array
 import Data.Grid (Grid(..), Coordinates, enumerate)
 import Data.Grid as Grid
 import Data.Int (even)
-import Data.List (List(..), (..), (:), filter)
+import Data.List (List(..), (..), (:), filter, length)
 import Data.List as List
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -47,6 +47,10 @@ import Reactor.Reaction (Reaction, widget)
 
 playerMaxHp :: Int
 playerMaxHp = 100
+
+globalRespawnTime :: Int
+globalRespawnTime = 375
+
 width :: Int
 width = 15
 
@@ -59,22 +63,27 @@ main = do
   runReactor x { title: "Bomberman", width, height,  
         widgets: [
           "section_hp" /\ Section {title: "Health"},
-          "label_hp" /\ Label {content: show $ playerMaxHp}
+          "label_hp" /\ Label {content: show $ playerMaxHp},
+          "section_score" /\ Section {title: "Score"},
+          "label_score" /\ Label {content: show $ 0}
         ]  }
 
 data Owner = Player | AI
 data Tile = Wall | Box | Bomb {time :: Int, owner :: Owner} | Explosion {time :: Int, owner :: Owner} | Empty
-data Direction = Right | Left | Down | Up
+data Direction = Right | Left | Down | Up | None
 
 derive instance ownerEq :: Eq Owner
+
+derive instance directionEq :: Eq Direction
 
 derive instance tileEq :: Eq Tile
 
 type World = { 
   player :: {coordinates :: Coordinates, playerHealth :: Int}, 
-  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Int},
+  enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean},
   board :: Grid Tile, 
-  timer :: Int}
+  timer :: Int,
+  score :: Int}
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -106,8 +115,11 @@ initial = do
   pure { 
         board: b, 
         player: {coordinates: { x: 1, y: 1}, playerHealth: 100}, 
-        enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: 0} : {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: 0} : Nil),  
-        timer: 0
+        enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: height -2}, wasKilled: false} : 
+          {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: 1, y: height -2}, wasKilled: false} :
+          {enemyCoordinates: { x: width - 2, y: 1},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: 1}, wasKilled: false} : Nil),  
+        timer: 0,
+        score: 0
         }
   where
   board = constructM width height (\point -> do
@@ -119,6 +131,7 @@ draw { player: { coordinates}, board, enemy } = do
   drawGrid board drawTile
   fill Color.blue600 $ tile coordinates
   drawEnemies enemy
+
   where
   drawEnemies Nil = fill Color.gray500 $ tile {x:0,y:0}
   drawEnemies (Cons f r) = do
@@ -134,7 +147,7 @@ draw { player: { coordinates}, board, enemy } = do
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player:{ coordinates }, board, enemy, timer} <- getW
+  {player:{ coordinates }, board, enemy, timer, score} <- getW
   let newBoard = updateGrid coordinates board Player
   let updatedBombs = updateBombs board
   case event of
@@ -146,6 +159,10 @@ handleEvent event = do
     Tick {} -> do
       
       let makeEnemiesMove = mapEnemies enemy timer board
+      let checkNewKills = length (filter (\x -> x.wasKilled) makeEnemiesMove)      
+      updateW_ { score: score + checkNewKills} 
+      widget "label_score" $ Label {content: show score}
+
 
       --this is really scuffed, but it works for now ,:D
       let enemyBombs = mapEnemyBombs enemy timer 
@@ -155,8 +172,8 @@ handleEvent event = do
 
       reducePlayerHealth
       checkPlayerHealth
-      --progressEnemyCooldowns has to be under updateW_ for explosions to work
-      progressEnemyCooldowns
+      --progressCooldowns has to be under updateW_ for explosions to work
+      progressCooldowns
       
 
     _ -> executeDefaultBehavior
@@ -193,27 +210,59 @@ handleEvent event = do
         else
           {x:0,y:0}
 
-    --enemyAction :: {enemyCoordinates :: Coordinates, lastEnemyDir :: Int} -> Number -> Grid Tile
-    enemyAction enemy@{enemyCoordinates, lastEnemyDir} timer board =
+    --enemyAction :: {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction} -> Number -> Grid Tile
+    enemyAction enemy@{enemyCoordinates, lastEnemyDir, respawnTime, respawnCoordinates, wasKilled} timer board =
       case Grid.index board enemyCoordinates of
           Nothing -> enemy
-          Just (Explosion {owner: Player}) -> {enemyCoordinates: {x:0,y:0}, lastEnemyDir}
+          Just (Explosion {owner: Player}) -> 
+            {enemyCoordinates: {x:0,y:0}, lastEnemyDir, respawnTime: globalRespawnTime, respawnCoordinates, wasKilled: true}
           _ ->
-            if ((timer `mod` 7) == 1) then 
-              let 
-                dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
-              in
-                moveEnemy board dir enemy
+            if (enemyCoordinates == {x:0,y:0}) && (respawnTime == 0) then
+              {enemyCoordinates: respawnCoordinates, lastEnemyDir: None, respawnTime, respawnCoordinates, wasKilled: false}
             else
-              enemy
+              if ((timer `mod` 7) == 1) then 
+                let 
+                  dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
+                in
+                  moveEnemy board dir enemy
+              else
+                {enemyCoordinates, lastEnemyDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
 
-    progressEnemyCooldowns = do
+    progressCooldowns = do
       {board, timer} <- getW        
       let e = enumerate board
       let explosion = explosionCheck e 0 board
       updateW_ {board: explosion, timer: timer + 1}
       executeDefaultBehavior
+
     
+generateRandomDirection :: Direction -> Effect Coordinates
+generateRandomDirection lastDir = do
+  h <- (randomInt 1 5)
+  case h of
+    1 -> if lastDir == Right then pure {x:0,y:0} else pure { x: -1, y: 0 }
+    2 -> if lastDir == Left then pure {x:0,y:0} else pure { x: 1, y: 0 }
+    3 -> if lastDir == Up then pure {x:0,y:0} else pure { x: 0, y: 1 }
+    4 -> if lastDir == Down then pure {x:0,y:0} else pure { x: 0, y: -1 }
+    _ -> pure {x:0,y:0}
+
+moveEnemy :: Grid Tile -> Coordinates -> 
+  {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean} -> 
+  {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
+moveEnemy board { x: xd, y: yd } {enemyCoordinates: {x,y}, lastEnemyDir, respawnTime, respawnCoordinates, wasKilled}=
+  if (isEmpty newEnemyPosition board) then
+    {enemyCoordinates: newEnemyPosition, lastEnemyDir: lDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
+  else
+    {enemyCoordinates:{x,y}, lastEnemyDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
+  where
+  isEmpty position board = Grid.index board position == Just Empty
+  newEnemyPosition = { x: x + xd, y: y + yd }
+  lDir = case {x: xd, y: yd} of
+              { x: -1, y: 0 } -> Left
+              { x: 1, y: 0 } -> Right
+              { x: 0, y: 1 } -> Down
+              { x: 0, y: -1 } -> Up
+              {x:_,y:_} -> None
 
 
 reducePlayerHealth :: Reaction World
@@ -229,35 +278,19 @@ reducePlayerHealth = do
         Just (Explosion {}) -> true
         _ -> false
 
-
-generateRandomDirection :: Int -> Effect Coordinates
-generateRandomDirection lastDir = do
-  h <- (randomInt 1 5)
-  case h of
-    1 -> if lastDir == 2 then pure {x:0,y:0} else pure { x: -1, y: 0 }
-    2 -> if lastDir == 1 then pure {x:0,y:0} else pure { x: 1, y: 0 }
-    3 -> if lastDir == 4 then pure {x:0,y:0} else pure { x: 0, y: 1 }
-    4 -> if lastDir == 3 then pure {x:0,y:0} else pure { x: 0, y: -1 }
-    _ -> pure {x:0,y:0}
-
-
-moveEnemy :: Grid Tile -> Coordinates -> 
-  {enemyCoordinates :: Coordinates, lastEnemyDir :: Int} -> 
-  {enemyCoordinates :: Coordinates, lastEnemyDir :: Int}
-moveEnemy board { x: xd, y: yd } {enemyCoordinates: {x,y}, lastEnemyDir}=
-  if (isEmpty newEnemyPosition board) then
-    {enemyCoordinates: newEnemyPosition, lastEnemyDir: lDir}
-  else
-    {enemyCoordinates:{x,y}, lastEnemyDir}
+movePlayer :: { x :: Int, y :: Int } -> Reaction World
+movePlayer { x: xd, y: yd } = do
+  { player: p@{ coordinates }, board } <- getW
+  let x = coordinates.x
+  let y = coordinates.y
+  let newPlayerPosition = { x: x + xd, y: y + yd }
+  when (isEmpty newPlayerPosition board) $
+    updateW_ { player: p {coordinates = newPlayerPosition} }
   where
   isEmpty position board = Grid.index board position == Just Empty
-  newEnemyPosition = { x: x + xd, y: y + yd }
-  lDir = case {x: xd, y: yd} of
-              { x: -1, y: 0 } -> 1
-              { x: 1, y: 0 } -> 2
-              { x: 0, y: 1 } -> 3 
-              { x: 0, y: -1 } -> 4
-              {x:_,y:_} -> 0
+
+
+
 
 
 updateGrid :: Coordinates -> Grid Tile -> Owner -> Grid Tile
@@ -274,7 +307,7 @@ updateBombs grid = do
   where
     x a = do
       case a of
-        Bomb {time: 0, owner} -> spy "" Explosion{time: 30, owner: owner}
+        Bomb {time: 0, owner} -> Explosion{time: 30, owner: owner}
         Bomb {time, owner} -> Bomb{time: time - 1, owner}
         Explosion {time: 0} -> Empty
         Explosion {time, owner} -> Explosion{time: time -1, owner}
@@ -309,11 +342,12 @@ explosionCheck grid i board = do
                 Right -> {x: x+r, y}
                 Left -> {x: x-r, y}
                 Up -> {x, y: y-r}
-                Down -> {x, y: y+r}  
+                Down -> {x, y: y+r}
+                _ -> {x,y}  
     case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
       Box -> Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
-      Bomb{owner} -> Grid.updateAt' newCords (Explosion{time: 31, owner: owner}) grid
+      Bomb{} -> Grid.updateAt' newCords (Explosion{time: 31, owner: ownr}) grid
       _ ->
           if r > 2 then
             Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
@@ -321,16 +355,6 @@ explosionCheck grid i board = do
             megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid) dir ownr
   
 
-movePlayer :: { x :: Int, y :: Int } -> Reaction World
-movePlayer { x: xd, y: yd } = do
-  { player: p@{ coordinates }, board } <- getW
-  let x = coordinates.x
-  let y = coordinates.y
-  let newPlayerPosition = { x: x + xd, y: y + yd }
-  when (isEmpty newPlayerPosition board) $
-    updateW_ { player: p {coordinates = newPlayerPosition} }
-  where
-  isEmpty position board = Grid.index board position == Just Empty
 
 
 
@@ -342,13 +366,6 @@ flipIt (Cons f r) = do
   x <- f
   y <- flipIt r
   pure $ Cons x y
-
-{-coolerFlipIt :: forall a b m. Monad m => List a -> (a -> m b) -> m (List b)
-coolerFlipIt Nil _ = pure Nil 
-coolerFlipIt (Cons f r) func = do
-  x <- func f
-  y <- coolerFlipIt r func
-  pure $ Cons x y-}
 
 to2D :: Int -> Coordinates
 to2D i = { x: i `mod` width, y: i / width }
