@@ -3,6 +3,7 @@ module Main
   , Tile(..)
   , World
   , Owner
+  , Buff
   , constructM
   , draw
   , flipIt
@@ -16,12 +17,12 @@ module Main
   , movePlayer
   , to2D
   , updateBombs
-  , updateGrid
+  , placeBomb
   , width
   )
   where
 
-import Debug
+
 import Prelude
 
 import Data.Array as Array
@@ -45,8 +46,8 @@ import Reactor.Reaction (Reaction, widget)
 
 
 
-playerMaxHp :: Int
-playerMaxHp = 100
+playerStartingHp :: Int
+playerStartingHp = 100
 
 globalRespawnTime :: Int
 globalRespawnTime = 375
@@ -63,27 +64,37 @@ main = do
   runReactor x { title: "Bomberman", width, height,  
         widgets: [
           "section_hp" /\ Section {title: "Health"},
-          "label_hp" /\ Label {content: show $ playerMaxHp},
+          "label_hp" /\ Label {content: show $ playerStartingHp},
           "section_score" /\ Section {title: "Score"},
-          "label_score" /\ Label {content: show $ 0}
+          "label_score" /\ Label {content: show $ 0},
+          "section_currentBuff" /\ Section {title: "Active Buff"},
+          "label_currentBuff" /\ Label {content: show $ "Nothing"}
         ]  }
 
 data Owner = Player | AI
-data Tile = Wall | Box | Bomb {time :: Int, owner :: Owner} | Explosion {time :: Int, owner :: Owner} | Empty
+data Tile = Wall | Box | Bomb {time :: Int, owner :: Owner} | Explosion {time :: Int, owner :: Owner} | Buff {type :: Buff} | Empty
 data Direction = Right | Left | Down | Up | None
 
+data Buff = Slow | Immortal | Heal | Power
+{-
+  slow - enemies move slower
+  immortal - you cannot take damage for a while
+  heal - heals 25 hp
+  power - makes explosions 1 larger and explosions can go through boxes, but they dont drop any buffs
+-}
+
+derive instance buffEq :: Eq Buff
 derive instance ownerEq :: Eq Owner
-
 derive instance directionEq :: Eq Direction
-
 derive instance tileEq :: Eq Tile
 
 type World = { 
-  player :: {coordinates :: Coordinates, playerHealth :: Int}, 
+  player :: {coordinates :: Coordinates, playerHealth :: Int, buff :: Maybe Buff, buffTimer :: Int}, 
   enemy :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean},
   board :: Grid Tile, 
   timer :: Int,
-  score :: Int}
+  score :: Int
+  }
 
 isWall :: Coordinates -> Boolean
 isWall { x, y } = x == 0 || x == (width - 1) || y == 0 || y == (height - 1) || ((even x) && (even y))
@@ -114,7 +125,7 @@ initial = do
   b <- board
   pure { 
         board: b, 
-        player: {coordinates: { x: 1, y: 1}, playerHealth: 100}, 
+        player: {coordinates: { x: 1, y: 1}, playerHealth: 100, buff: Nothing, buffTimer: 0}, 
         enemy: ({enemyCoordinates: { x: width - 2, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: height -2}, wasKilled: false} : 
           {enemyCoordinates: { x: 1, y: height -2},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: 1, y: height -2}, wasKilled: false} :
           {enemyCoordinates: { x: width - 2, y: 1},lastEnemyDir: None, respawnTime: 0, respawnCoordinates: { x: width - 2, y: 1}, wasKilled: false} : Nil),  
@@ -144,11 +155,15 @@ draw { player: { coordinates}, board, enemy } = do
       Wall -> Just Color.gray500
       Bomb{time: _} -> Just Color.red500
       Explosion {} -> Just Color.yellow700
+      Buff {type: Slow} -> Just Color.pink900
+      Buff {type: Immortal} -> Just Color.blue900
+      Buff {type: Heal} -> Just Color.green900
+      Buff {type: Power} -> Just Color.yellow800
 
 handleEvent :: Event -> Reaction World
 handleEvent event = do
-  {player:{ coordinates }, board, enemy, timer, score} <- getW
-  let newBoard = updateGrid coordinates board Player
+  {player:{ coordinates, buff }, board, enemy, timer, score} <- getW
+  let newBoard = placeBomb coordinates board Player
   let updatedBombs = updateBombs board
   case event of
     KeyPress { key: "ArrowLeft" } -> movePlayer { x: -1, y: 0 }
@@ -157,8 +172,8 @@ handleEvent event = do
     KeyPress { key: "ArrowUp" } -> movePlayer { x: 0, y: -1 }
     KeyPress { key: " " } -> updateW_ {board: newBoard}
     Tick {} -> do
-      
-      let makeEnemiesMove = mapEnemies enemy timer board
+      let b = fromMaybe Heal buff 
+      let makeEnemiesMove = mapEnemies enemy timer board b
       let checkNewKills = length (filter (\x -> x.wasKilled) makeEnemiesMove)      
       updateW_ { score: score + checkNewKills} 
       widget "label_score" $ Label {content: show score}
@@ -167,20 +182,24 @@ handleEvent event = do
       --this is really scuffed, but it works for now ,:D
       let enemyBombs = mapEnemyBombs enemy timer 
       let poi = filter (_ /= {x:0,y:0}) enemyBombs
-      let newEnemyBomb = updateGrid (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs AI
+      let newEnemyBomb = placeBomb (fromMaybe {x:0,y:0} (List.head $ poi)) updatedBombs AI
       updateW_ {board: newEnemyBomb, enemy: makeEnemiesMove}
-
-      reducePlayerHealth
+      if b /= Immortal then
+        reducePlayerHealth
+      else
+        executeDefaultBehavior
       checkPlayerHealth
       --progressCooldowns has to be under updateW_ for explosions to work
       progressCooldowns
       
-
     _ -> executeDefaultBehavior
   where
-    mapEnemies Nil _ _ = Nil
-    mapEnemies (Cons f r) timer board =
-      (enemyAction f timer board) : (mapEnemies r timer board)
+    mapEnemies :: List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
+      -> Int -> Grid Tile -> Buff -> 
+      List{enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
+    mapEnemies Nil _ _ _ = Nil
+    mapEnemies (Cons f r) timer board b =
+      (enemyAction f timer board b) : (mapEnemies r timer board b)
 
     mapEnemyBombs Nil _ = Nil
     mapEnemyBombs (Cons f r) timer =
@@ -211,29 +230,41 @@ handleEvent event = do
           {x:0,y:0}
 
     --enemyAction :: {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction} -> Number -> Grid Tile
-    enemyAction enemy@{enemyCoordinates, lastEnemyDir, respawnTime, respawnCoordinates, wasKilled} timer board =
-      case Grid.index board enemyCoordinates of
-          Nothing -> enemy
-          Just (Explosion {owner: Player}) -> 
-            {enemyCoordinates: {x:0,y:0}, lastEnemyDir, respawnTime: globalRespawnTime, respawnCoordinates, wasKilled: true}
-          _ ->
-            if (enemyCoordinates == {x:0,y:0}) && (respawnTime == 0) then
-              {enemyCoordinates: respawnCoordinates, lastEnemyDir: None, respawnTime, respawnCoordinates, wasKilled: false}
-            else
-              if ((timer `mod` 7) == 1) then 
-                let 
-                  dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
-                in
-                  moveEnemy board dir enemy
+    enemyAction enemy@{enemyCoordinates, lastEnemyDir, respawnTime, respawnCoordinates} timer board buff =
+      let 
+        speedDivision = if buff == Slow then 20 else 7
+      in
+        case Grid.index board enemyCoordinates of
+            Nothing -> enemy
+            Just (Explosion {owner: Player}) -> 
+              enemy {enemyCoordinates = {x:0,y:0}, respawnTime = globalRespawnTime, wasKilled = true}
+            _ ->
+              if (enemyCoordinates == {x:0,y:0}) && (respawnTime == 0) then
+                enemy {enemyCoordinates = respawnCoordinates, lastEnemyDir = None}
               else
-                {enemyCoordinates, lastEnemyDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
+                if ((timer `mod` (speedDivision)) == 1) then 
+                  let 
+                    dir = unsafePerformEffect (generateRandomDirection lastEnemyDir)
+                  in
+                    moveEnemy board dir enemy
+                else
+                  enemy { respawnTime = respawnTime - 1, wasKilled = false}
 
     progressCooldowns = do
-      {board, timer} <- getW        
-      let e = enumerate board
-      let explosion = explosionCheck e 0 board
-      updateW_ {board: explosion, timer: timer + 1}
-      executeDefaultBehavior
+      {board, timer, player: p@{ buff, buffTimer}} <- getW        
+      let e = enumerate board      
+      case buff of
+        Nothing -> do
+          let explosion = explosionCheck e 0 board Heal
+          updateW_ {board: explosion, timer: timer + 1}
+        Just b -> do
+          let explosion = explosionCheck e 0 board b
+          updateW_ {board: explosion, timer: timer + 1}
+          if buffTimer == 375 then do
+            updateW_ {player:p { buff = Nothing, buffTimer = 0}}
+            widget "label_currentBuff" $ Label {content: show "Nothing"}
+          else
+            updateW_ {player: p { buffTimer = buffTimer + 1 }}
 
     
 generateRandomDirection :: Direction -> Effect Coordinates
@@ -249,11 +280,11 @@ generateRandomDirection lastDir = do
 moveEnemy :: Grid Tile -> Coordinates -> 
   {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean} -> 
   {enemyCoordinates :: Coordinates, lastEnemyDir :: Direction, respawnTime :: Int, respawnCoordinates :: Coordinates, wasKilled :: Boolean}
-moveEnemy board { x: xd, y: yd } {enemyCoordinates: {x,y}, lastEnemyDir, respawnTime, respawnCoordinates, wasKilled}=
+moveEnemy board { x: xd, y: yd } enemy@{enemyCoordinates: {x,y}, respawnTime}=
   if (isEmpty newEnemyPosition board) then
-    {enemyCoordinates: newEnemyPosition, lastEnemyDir: lDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
+    enemy {enemyCoordinates = newEnemyPosition, lastEnemyDir = lDir, respawnTime = respawnTime - 1, wasKilled = false}
   else
-    {enemyCoordinates:{x,y}, lastEnemyDir, respawnTime: respawnTime - 1, respawnCoordinates, wasKilled: false}
+    enemy {enemyCoordinates ={x,y}, respawnTime = respawnTime - 1, wasKilled = false}
   where
   isEmpty position board = Grid.index board position == Just Empty
   newEnemyPosition = { x: x + xd, y: y + yd }
@@ -280,21 +311,42 @@ reducePlayerHealth = do
 
 movePlayer :: { x :: Int, y :: Int } -> Reaction World
 movePlayer { x: xd, y: yd } = do
-  { player: p@{ coordinates }, board } <- getW
+  { player: p@{ coordinates, playerHealth }, board } <- getW
   let x = coordinates.x
   let y = coordinates.y
   let newPlayerPosition = { x: x + xd, y: y + yd }
-  when (isEmpty newPlayerPosition board) $
-    updateW_ { player: p {coordinates = newPlayerPosition} }
-  where
-  isEmpty position board = Grid.index board position == Just Empty
+  let newTile = Grid.index board newPlayerPosition 
+  case newTile of
+    Just Empty -> updateW_ { player: p {coordinates = newPlayerPosition} }
+    Just (Buff {type: Slow}) -> do
+      let newBoard = Grid.updateAt' newPlayerPosition Empty board 
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Slow, buffTimer = 0}}
+      widget "label_currentBuff" $ Label {content: show "Slow"}    
+
+    Just (Buff {type: Immortal}) -> do
+      let newBoard = Grid.updateAt' newPlayerPosition Empty board 
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Immortal, buffTimer = 0}}
+      widget "label_currentBuff" $ Label {content: show "Immortal"}
+
+    Just (Buff {type: Heal}) -> do
+      let newHP = playerHealth + 25
+      let newBoard = Grid.updateAt' newPlayerPosition Empty board 
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, 
+        playerHealth = if newHP > 100 then 100 else newHP, buff = Nothing, buffTimer = 0}}
+      widget "label_currentBuff" $ Label {content: show "Nothing"}
+
+    Just (Buff {type: Power}) -> do
+      let newBoard = Grid.updateAt' newPlayerPosition Empty board 
+      updateW_ { board: newBoard, player: p {coordinates = newPlayerPosition, buff = Just Power, buffTimer = 0}}
+      widget "label_currentBuff" $ Label {content: show "Power"}
+
+    _ -> executeDefaultBehavior
 
 
 
 
-
-updateGrid :: Coordinates -> Grid Tile -> Owner -> Grid Tile
-updateGrid cords board ownr = do
+placeBomb :: Coordinates -> Grid Tile -> Owner -> Grid Tile
+placeBomb cords board ownr = do
   let newBoard = (Grid.updateAt cords (Bomb{time: 50, owner: ownr}) board)
   case newBoard of 
     Nothing -> board
@@ -310,33 +362,33 @@ updateBombs grid = do
         Bomb {time: 0, owner} -> Explosion{time: 30, owner: owner}
         Bomb {time, owner} -> Bomb{time: time - 1, owner}
         Explosion {time: 0} -> Empty
-        Explosion {time, owner} -> Explosion{time: time -1, owner}
+        Explosion {time, owner} -> Explosion{time: time - 1, owner}
         _ -> a
         
-explosionCheck :: Array (Tuple Coordinates Tile) -> Int -> Grid Tile -> Grid Tile
-explosionCheck grid i board = do
+explosionCheck :: Array (Tuple Coordinates Tile) -> Int -> Grid Tile -> Buff -> Grid Tile
+explosionCheck grid i board buff = do
   let x = (fromMaybe (Tuple {x:0,y:0} Empty) (Array.index grid i))
   if i > (height*width) then
     board
   else if (snd x == Explosion{time: 30, owner: Player}) then
-    explode (fst x) Player
+    explode (fst x) Player buff
   else if (snd x == Explosion{time: 30, owner: AI}) then
-    explode (fst x) AI
+    explode (fst x) AI buff
   else
-    explosionCheck grid (i+1) board   
+    explosionCheck grid (i+1) board buff  
 
   where 
-  explode :: Coordinates -> Owner -> Grid Tile
-  explode {x,y} ownr = do
+  explode :: Coordinates -> Owner -> Buff -> Grid Tile
+  explode {x,y} ownr buff = do
 
-    let a = megaExplode {x,y} 1 board Right ownr
-    let b = megaExplode {x,y} 1 a Down ownr
-    let c = megaExplode {x,y} 1 b Left ownr
-    let d = megaExplode {x,y} 1 c Up ownr
+    let a = megaExplode {x,y} 1 board Right ownr buff
+    let b = megaExplode {x,y} 1 a Down ownr buff
+    let c = megaExplode {x,y} 1 b Left ownr buff
+    let d = megaExplode {x,y} 1 c Up ownr buff
     Grid.updateAt' {x: x, y: y} (Explosion{time: 29, owner: ownr}) d
 
-  megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Owner -> Grid Tile
-  megaExplode {x,y} r grid dir ownr = do
+  megaExplode :: Coordinates -> Int -> Grid Tile -> Direction -> Owner -> Buff -> Grid Tile
+  megaExplode {x,y} r grid dir ownr buff = do
     let newCords = 
               case dir of
                 Right -> {x: x+r, y}
@@ -344,15 +396,34 @@ explosionCheck grid i board = do
                 Up -> {x, y: y-r}
                 Down -> {x, y: y+r}
                 _ -> {x,y}  
+    let buffR = if buff == Power then r-1 else r
     case (fromMaybe Empty (Grid.index grid newCords)) of
       Wall -> grid
-      Box -> Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
-      Bomb{} -> Grid.updateAt' newCords (Explosion{time: 31, owner: ownr}) grid
-      _ ->
-          if r > 2 then
+      Box -> if buff == Power then
+        if buffR > 2 then
             Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
           else
-            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid) dir ownr
+            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid) dir ownr buff 
+        else
+          Grid.updateAt' newCords (generateRandomBuff ownr) grid
+      Bomb{} -> Grid.updateAt' newCords (Explosion{time: 31, owner: ownr}) grid
+      _ ->
+          if buffR > 2 then
+            Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid
+          else
+            megaExplode {x,y} (r+1) (Grid.updateAt' newCords (Explosion{time: 29, owner: ownr}) grid) dir ownr buff
+  
+  generateRandomBuff :: Owner -> Tile
+  generateRandomBuff ownr = 
+    let
+      h = unsafePerformEffect (randomInt 1 5)
+    in
+      case h of
+        1 -> Buff{type: Slow}
+        2 -> Buff {type: Immortal}
+        3 -> Buff {type: Heal}
+        4 -> Buff {type: Power}
+        _ -> Explosion{time: 29, owner: ownr}
   
 
 
