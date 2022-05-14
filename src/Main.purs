@@ -1,9 +1,10 @@
 module Main
-  ( Direction(..)
+  ( Buff
+  , Direction(..)
+  , Enemies
+  , Owner
   , Tile(..)
   , World
-  , Owner
-  , Buff
   , constructM
   , draw
   , flipIt
@@ -15,9 +16,9 @@ module Main
   , isWall
   , main
   , movePlayer
+  , placeBomb
   , to2D
   , updateBombs
-  , placeBomb
   , width
   )
   where
@@ -25,7 +26,6 @@ module Main
 
 import Prelude
 
-import Color.Scheme.X11 (turquoise)
 import Data.Array as Array
 import Data.Grid (Grid(..), Coordinates, enumerate)
 import Data.Grid as Grid
@@ -44,7 +44,6 @@ import Reactor.Events (Event(..))
 import Reactor.Graphics.Colors as Color
 import Reactor.Graphics.Drawing (Drawing, drawGrid, fill, tile)
 import Reactor.Reaction (Reaction, widget)
-import Web.HTML.Event.EventTypes (offline)
 
 
 
@@ -95,6 +94,19 @@ derive instance buffEq :: Eq Buff
 derive instance ownerEq :: Eq Owner
 derive instance directionEq :: Eq Direction
 derive instance tileEq :: Eq Tile
+
+type Enemies = List{
+    enemyCoordinates :: Coordinates, 
+    lastEnemyDir :: Direction, 
+    respawnTime :: Int, 
+    respawnCoordinates :: Coordinates, 
+    wasKilled :: Boolean}
+type Enemy = {
+    enemyCoordinates :: Coordinates, 
+    lastEnemyDir :: Direction, 
+    respawnTime :: Int, 
+    respawnCoordinates :: Coordinates, 
+    wasKilled :: Boolean}
 
 type World = { 
   player :: {
@@ -227,29 +239,17 @@ handleEvent event = do
     _ -> executeDefaultBehavior
   where
     mapEnemies :: 
-      List{enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean} -> 
+      Enemies -> 
       Int -> 
       Grid Tile -> 
       Buff -> 
-      List{enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean}
+      Enemies
     mapEnemies Nil _ _ _ = Nil
     mapEnemies (Cons f r) timer board b =
       (enemyAction f timer board b) : (mapEnemies r timer board b)
 
     mapEnemyBombs :: 
-      List{enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean} ->
+      Enemies ->
       Int ->
       List Coordinates
     mapEnemyBombs Nil _ = Nil
@@ -273,11 +273,7 @@ handleEvent event = do
         _ -> pure false
 
     enemyPlaceBomb :: 
-      {enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean} -> 
+      Enemy -> 
       Int -> 
       Coordinates
     enemyPlaceBomb {enemyCoordinates} timer =
@@ -291,19 +287,11 @@ handleEvent event = do
           {x:0,y:0}
 
     enemyAction :: 
-      {enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean} ->
+      Enemy ->
       Int ->
       Grid Tile ->
       Buff ->
-      {enemyCoordinates :: Coordinates, 
-        lastEnemyDir :: Direction, 
-        respawnTime :: Int, 
-        respawnCoordinates :: Coordinates, 
-        wasKilled :: Boolean}
+      Enemy
     enemyAction enemy@{enemyCoordinates, lastEnemyDir, respawnTime, respawnCoordinates} timer board buff =
       let 
         speedDivision = if buff == Slow then 20 else 7
@@ -356,16 +344,8 @@ generateRandomDirection lastDir = do
 moveEnemy :: 
   Grid Tile -> 
   Coordinates -> 
-  {enemyCoordinates :: Coordinates, 
-    lastEnemyDir :: Direction, 
-    respawnTime :: Int, 
-    respawnCoordinates :: Coordinates, 
-    wasKilled :: Boolean} -> 
-  {enemyCoordinates :: Coordinates, 
-  lastEnemyDir :: Direction, 
-  respawnTime :: Int, 
-  respawnCoordinates :: Coordinates, 
-  wasKilled :: Boolean}
+  Enemy -> 
+  Enemy
 moveEnemy board { x: xd, y: yd } enemy@{enemyCoordinates: {x,y}, respawnTime}=
   if (isEmpty newEnemyPosition board) then
     enemy {enemyCoordinates = newEnemyPosition, lastEnemyDir = lDir, respawnTime = respawnTime - 1, wasKilled = false}
